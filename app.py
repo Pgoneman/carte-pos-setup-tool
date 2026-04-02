@@ -1,17 +1,19 @@
 """
 CARTE POS Setup Tool
-Upload a menu Excel or paste a Google Maps URL → instant CARTE POS setup file.
+Upload a menu Excel or paste a BentoBox / Google Maps URL → instant CARTE POS setup file.
 """
 
 import os
 import re
 import json
 from datetime import datetime
+from urllib.parse import urlparse
 from flask import Flask, request, jsonify, render_template, send_file
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
 from openpyxl.utils import get_column_letter
 import requests as http_req
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024
@@ -34,6 +36,338 @@ def parse_price(raw):
 def clean(v):
     s = str(v or '').strip()
     return '' if s.lower() in ('', 'none', 'nan') else s
+
+
+def is_bentobox_url(url):
+    """Check if a URL is a BentoBox restaurant website."""
+    return bool(re.search(r'\.getbento\.com', url, re.IGNORECASE))
+
+
+def extract_bentobox_base(url):
+    """Extract the base BentoBox URL (https://{slug}.getbento.com)."""
+    parsed = urlparse(url if '://' in url else 'https://' + url)
+    host = parsed.hostname or ''
+    m = re.match(r'([\w-]+\.getbento\.com)', host)
+    if m:
+        return f'https://{m.group(1)}'
+    return None
+
+
+# ─── BentoBox API Integration ────────────────────────────────────────────
+
+# Allergen boolean fields on BentoBox products → grouped for output
+ALLERGEN_FIELDS = [
+    'fish', 'shellfish', 'dairy', 'egg', 'gluten', 'wheat',
+    'peanut', 'tree_nut', 'soy', 'sesame', 'corn',
+]
+DIETARY_FIELDS = [
+    'vegan', 'vegetarian', 'gluten_free', 'dairy_free',
+    'halal', 'kosher', 'keto', 'paleo', 'plant_based',
+    'organic', 'raw', 'spicy', 'mild', 'medium', 'hot',
+]
+
+
+def _extract_flags(product, field_list):
+    """Extract truthy boolean flags from a BentoBox product dict."""
+    return [f for f in field_list if product.get(f)]
+
+
+def _find_menu_id(location):
+    """Find a valid menu_id from a BentoBox location's fulfillment_options.
+    Checks pickup, delivery, and dine_in in order."""
+    opts = location.get('fulfillment_options', {})
+    for ftype in ('pickup', 'delivery', 'dine_in'):
+        foption = opts.get(ftype, {})
+        datetimes = foption.get('datetimes_with_ranges', [])
+        if datetimes:
+            hour_ranges = datetimes[0].get('hour_ranges', [])
+            if hour_ranges:
+                mid = hour_ranges[0].get('menu_id')
+                if mid:
+                    return mid
+    return None
+
+
+def _extract_hours_from_location(location):
+    """Extract structured hours from a BentoBox location."""
+    hours = {}
+    for htype in ('pickup', 'delivery', 'dine_in'):
+        key = f'open_{htype}_hours'
+        hdata = location.get(key, {})
+        weekday = hdata.get('weekday_hours', {})
+        if weekday:
+            hours[htype] = weekday
+    return hours
+
+
+def _extract_business_name_from_html(base_url, session):
+    """Try to extract the business name from JSON-LD on the main page."""
+    try:
+        resp = session.get(base_url, timeout=10)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        for script in soup.find_all('script', type='application/ld+json'):
+            try:
+                data = json.loads(script.string)
+                if isinstance(data, dict):
+                    if data.get('@type') == 'Organization' and data.get('name'):
+                        return data['name']
+                    if data.get('name'):
+                        return data['name']
+                elif isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and item.get('name'):
+                            return item['name']
+            except (json.JSONDecodeError, TypeError):
+                continue
+        # Fallback: parse <title>
+        title_tag = soup.find('title')
+        if title_tag and title_tag.string:
+            name = title_tag.string.strip()
+            # Remove common suffixes
+            name = re.sub(r'\s*[|–-]\s*(Online Ordering|Menu|Restaurant|Home).*$', '', name, flags=re.IGNORECASE)
+            return name.strip()
+    except Exception:
+        pass
+    # Last fallback: derive from subdomain
+    parsed = urlparse(base_url)
+    subdomain = (parsed.hostname or '').split('.')[0]
+    return subdomain.replace('-', ' ').title()
+
+
+def fetch_bentobox_data(url):
+    """Fetch full menu data from a BentoBox restaurant website.
+
+    Returns a dict with business_name, locations (each with address, hours, menu).
+    """
+    base_url = extract_bentobox_base(url)
+    if not base_url:
+        raise ValueError(f'Not a valid BentoBox URL: {url}')
+
+    s = http_req.Session()
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+    })
+
+    # Step 1: Get session + CSRF from ordering page
+    try:
+        s.get(f'{base_url}/online-ordering/', timeout=15)
+    except Exception as e:
+        raise ValueError(f'Could not reach BentoBox site: {e}')
+
+    csrf = s.cookies.get('csrftoken', '')
+    if csrf:
+        s.headers['X-CSRFToken'] = csrf
+
+    # Get business name from main page JSON-LD
+    business_name = _extract_business_name_from_html(base_url, s)
+
+    # Step 2: Get locations
+    try:
+        resp = s.get(f'{base_url}/api/online_ordering_location_public/', timeout=15)
+        resp.raise_for_status()
+        raw_locations = resp.json()
+    except Exception as e:
+        raise ValueError(f'Failed to fetch BentoBox locations: {e}')
+
+    if not raw_locations:
+        raise ValueError('No locations found on this BentoBox site')
+
+    locations = []
+    for loc in raw_locations:
+        loc_data = loc.get('location', {})
+        loc_id = loc.get('id')
+
+        # Build address
+        address = {
+            'street': loc_data.get('street', ''),
+            'city': loc_data.get('city', ''),
+            'state': loc_data.get('state', ''),
+            'zip': loc_data.get('postal_code', ''),
+        }
+
+        # Find menu_id
+        menu_id = _find_menu_id(loc)
+
+        # Extract hours
+        hours = _extract_hours_from_location(loc)
+
+        location_entry = {
+            'id': loc_id,
+            'name': loc_data.get('name', ''),
+            'slug': loc_data.get('slug', ''),
+            'address': address,
+            'phone': loc_data.get('phone_number', ''),
+            'lat': str(loc_data.get('lat', '')),
+            'lng': str(loc_data.get('lng', '')),
+            'hours': hours,
+            'menu_id': menu_id,
+            'menu': {'categories': []},
+        }
+
+        # Step 3 + 4: Init ordering and get menu for this location
+        if menu_id and loc_id:
+            try:
+                # Re-fetch CSRF for safety
+                s.get(f'{base_url}/online-ordering/', timeout=10)
+                csrf = s.cookies.get('csrftoken', '')
+                if csrf:
+                    s.headers['X-CSRFToken'] = csrf
+
+                # Init ordering session
+                s.put(f'{base_url}/api/online_ordering/initial_data/',
+                      json={'location_id': loc_id, 'commerce_type': 'online_ordering'},
+                      timeout=15)
+
+                # Get menu
+                menu_resp = s.get(f'{base_url}/api/online_ordering/menu/{menu_id}/', timeout=20)
+                menu_resp.raise_for_status()
+                menu_data = menu_resp.json()
+
+                categories = []
+                for section in menu_data.get('sections', []):
+                    cat = {
+                        'name': section.get('name', 'Uncategorized'),
+                        'description': section.get('description', ''),
+                        'items': [],
+                    }
+                    for item_wrapper in section.get('items', []):
+                        product = item_wrapper.get('product', {})
+                        # Image URL
+                        images = product.get('images', [])
+                        image_url = images[0].get('url', '') if images else ''
+
+                        # Allergens and dietary flags
+                        allergens = _extract_flags(product, ALLERGEN_FIELDS)
+                        dietary = _extract_flags(product, DIETARY_FIELDS)
+
+                        # Variants
+                        variants = []
+                        for v in product.get('variants', []):
+                            variants.append({
+                                'name': v.get('name', ''),
+                                'price': parse_price(v.get('price')),
+                                'weight': v.get('weight', ''),
+                                'calories': v.get('calories', ''),
+                            })
+
+                        # Default price
+                        price = parse_price(product.get('default_price'))
+                        if not price and variants:
+                            price = variants[0].get('price', 0)
+
+                        cat['items'].append({
+                            'name': product.get('name', ''),
+                            'price': price,
+                            'description': product.get('description', ''),
+                            'image_url': image_url,
+                            'allergens': allergens,
+                            'dietary': dietary,
+                            'variants': variants,
+                        })
+                    categories.append(cat)
+
+                location_entry['menu'] = {'categories': categories}
+            except Exception:
+                # Menu fetch failed for this location - continue with empty menu
+                pass
+
+        locations.append(location_entry)
+
+    return {
+        'success': True,
+        'source': 'bentobox',
+        'business_name': business_name,
+        'locations': locations,
+    }
+
+
+def bentobox_to_parsed(bb_data):
+    """Convert BentoBox API data to the internal parsed format used by Excel generation."""
+    parsed = {
+        'stores': [],
+        'hours': [],
+        'menus': {},
+        'options': [],
+        'compare': [],
+        'sheets_found': ['BentoBox Import'],
+    }
+
+    biz_name = bb_data.get('business_name', 'Store')
+
+    for loc in bb_data.get('locations', []):
+        addr = loc.get('address', {})
+        store_name = loc.get('name') or biz_name
+        full_address = ', '.join(filter(None, [
+            addr.get('street', ''), addr.get('city', ''),
+            addr.get('state', ''), addr.get('zip', ''),
+        ]))
+
+        parsed['stores'].append({
+            'business_name': biz_name,
+            'name': store_name,
+            'address': full_address,
+            'phone': loc.get('phone', ''),
+            'lat': loc.get('lat', ''),
+            'lng': loc.get('lng', ''),
+            'street': addr.get('street', ''),
+            'city': addr.get('city', ''),
+            'state': addr.get('state', ''),
+            'zip': addr.get('zip', ''),
+        })
+
+        # Hours
+        day_names = {
+            '0': 'Mon', '1': 'Tue', '2': 'Wed', '3': 'Thu',
+            '4': 'Fri', '5': 'Sat', '6': 'Sun',
+        }
+        for htype, weekday_hours in loc.get('hours', {}).items():
+            label = htype.replace('_', ' ').title()
+            if isinstance(weekday_hours, dict):
+                for day_num, ranges in weekday_hours.items():
+                    day_label = day_names.get(str(day_num), str(day_num))
+                    if isinstance(ranges, list):
+                        for r in ranges:
+                            if isinstance(r, dict):
+                                parsed['hours'].append({
+                                    'store': store_name,
+                                    'type': label,
+                                    'days': day_label,
+                                    'open': r.get('open', ''),
+                                    'close': r.get('close', ''),
+                                })
+                            elif isinstance(r, (list, tuple)) and len(r) >= 2:
+                                parsed['hours'].append({
+                                    'store': store_name,
+                                    'type': label,
+                                    'days': day_label,
+                                    'open': str(r[0]),
+                                    'close': str(r[1]),
+                                })
+
+        # Menu items
+        menu_items = []
+        for cat in loc.get('menu', {}).get('categories', []):
+            for item in cat.get('items', []):
+                allergens = item.get('allergens', [])
+                dietary = item.get('dietary', [])
+                allergen_str = ', '.join(allergens + dietary)
+                menu_items.append({
+                    'category': cat.get('name', ''),
+                    'name': item.get('name', ''),
+                    'price': item.get('price', 0),
+                    'description': item.get('description', ''),
+                    'image_url': item.get('image_url', ''),
+                    'allergens': allergens,
+                    'dietary': dietary,
+                    'allergen_info': allergen_str,
+                    'option_groups': '',
+                    'options_text': '',
+                })
+        parsed['menus'][store_name] = menu_items
+
+    return parsed
 
 
 # ─── Smart Excel Parser ───────────────────────────────────────────────────
@@ -427,20 +761,26 @@ def generate_carte_excel(parsed, store_info_override=None, settings=None):
     all_items = []
     for store_name, items in parsed.get('menus', {}).items():
         for it in items:
+            allergen_info = it.get('allergen_info', '')
+            if not allergen_info:
+                # Build from lists if available
+                parts = it.get('allergens', []) + it.get('dietary', [])
+                allergen_info = ', '.join(parts) if parts else ''
             all_items.append([
                 it.get('category', ''),
                 it.get('name', ''),
                 it.get('description', ''),
                 it.get('price', 0),
                 '',  # item_cost
-                '',  # allergen_info
+                allergen_info,
                 'Y', # included_tax
                 'Y', # visible
+                it.get('image_url', ''),
             ])
     _styled_sheet(ws2,
-        ['item_category', 'item_name', 'description', 'price', 'item_cost', 'allergen_info', 'included_tax', 'visible'],
+        ['item_category', 'item_name', 'description', 'price', 'item_cost', 'allergen_info', 'included_tax', 'visible', 'image_url'],
         all_items,
-        [20, 30, 40, 10, 10, 20, 14, 10])
+        [20, 30, 40, 10, 10, 20, 14, 10, 40])
 
     # ── Sheet 3: Menu Full (with options info) ──
     ws3 = wb.create_sheet('Menu Detail')
@@ -558,12 +898,17 @@ def generate_menu_import_excel(parsed, store_filter=None):
     for store_name, menu in parsed.get('menus', {}).items():
         if store_filter and store_filter != store_name: continue
         for it in menu:
+            allergen_info = it.get('allergen_info', '')
+            if not allergen_info:
+                parts = it.get('allergens', []) + it.get('dietary', [])
+                allergen_info = ', '.join(parts) if parts else ''
             items.append([it.get('category',''), it.get('name',''),
                          it.get('description',''), it.get('price',0),
-                         '', '', 'Y', 'Y'])
+                         '', allergen_info, 'Y', 'Y',
+                         it.get('image_url', '')])
     _styled_sheet(ws,
-        ['item_category','item_name','description','price','item_cost','allergen_info','included_tax','visible'],
-        items, [20, 30, 40, 10, 10, 20, 14, 10])
+        ['item_category','item_name','description','price','item_cost','allergen_info','included_tax','visible','image_url'],
+        items, [20, 30, 40, 10, 10, 20, 14, 10, 40])
 
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
     filename = f'CARTE_Menu_Import_{ts}.xlsx'
@@ -624,12 +969,42 @@ def api_parse_menu():
     })
 
 
+@app.route('/api/fetch-bentobox', methods=['POST'])
+def api_fetch_bentobox():
+    """Fetch menu data from a BentoBox restaurant website."""
+    data = request.get_json(silent=True) or {}
+    url = data.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'No URL provided'}), 400
+    if not is_bentobox_url(url):
+        return jsonify({'error': 'Not a valid BentoBox URL (must be *.getbento.com)'}), 400
+    try:
+        result = fetch_bentobox_data(url)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        return jsonify({'error': f'BentoBox fetch failed: {e}'}), 500
+
+
 @app.route('/api/fetch-place', methods=['POST'])
 def api_fetch_place():
     data = request.get_json(silent=True) or {}
     query = data.get('query', '').strip()
     if not query:
         return jsonify({'error': 'No query provided'}), 400
+
+    # Detect BentoBox URLs and redirect to BentoBox fetcher
+    if is_bentobox_url(query):
+        try:
+            result = fetch_bentobox_data(query)
+            return jsonify(result)
+        except ValueError as e:
+            return jsonify({'error': str(e)}), 400
+        except Exception as e:
+            return jsonify({'error': f'BentoBox fetch failed: {e}'}), 500
+
+    # Google Maps or generic query
     result = fetch_place_info(query)
     return jsonify({'success': True, 'result': result})
 
@@ -638,12 +1013,16 @@ def api_fetch_place():
 def api_generate_excel():
     data = request.get_json(silent=True) or {}
 
-    # Check if we have a previously uploaded file to re-parse
+    # Check if we have BentoBox data
+    bentobox_data = data.get('bentobox_data')
     upload_file = data.get('upload_filename', '')
     store_info = data.get('store_info', {})
     settings = data.get('settings', {})
 
-    if upload_file:
+    if bentobox_data:
+        # Convert BentoBox data to parsed format
+        parsed = bentobox_to_parsed(bentobox_data)
+    elif upload_file:
         filepath = os.path.join(UPLOAD_DIR, re.sub(r'[^\w.\-]', '_', upload_file))
         if os.path.exists(filepath):
             parsed = parse_uploaded_excel(filepath)
@@ -732,11 +1111,19 @@ def api_push_to_pos():
         # Import in batches
         batch = []
         for it in items:
-            batch.append({
+            allergen_info = it.get('allergen_info', '')
+            if not allergen_info:
+                parts = it.get('allergens', []) + it.get('dietary', [])
+                allergen_info = ', '.join(parts) if parts else ''
+            item_payload = {
                 'item_category': it.get('category',''), 'item_name': it.get('name',''),
                 'description': it.get('description',''), 'price': it.get('price',0),
-                'item_cost': 0, 'allergen_info': '', 'included_tax': 'Y', 'visible': 'Y',
-            })
+                'item_cost': 0, 'allergen_info': allergen_info,
+                'included_tax': 'Y', 'visible': 'Y',
+            }
+            if it.get('image_url'):
+                item_payload['image_url'] = it['image_url']
+            batch.append(item_payload)
             if len(batch) >= 50:
                 try:
                     r = http_req.post(f'{CARTE_API}/api/menu/import',
