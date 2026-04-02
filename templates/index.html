@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CARTE POS Setup Tool</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: 'Segoe UI', -apple-system, sans-serif; background:#f0f4f8; color:#1e293b; }
+
+.topbar { background:linear-gradient(135deg,#006EFF,#4f46e5); color:#fff; padding:16px 32px; display:flex; align-items:center; justify-content:space-between; box-shadow:0 2px 12px rgba(0,0,0,.15); }
+.topbar h1 { font-size:20px; font-weight:700; }
+.topbar h1 span { font-weight:300; opacity:.8; margin-left:8px; font-size:14px; }
+.topbar .badge { background:rgba(255,255,255,.2); padding:4px 12px; border-radius:20px; font-size:12px; }
+
+.main { max-width:1100px; margin:0 auto; padding:28px 20px; }
+
+.hero { background:#fff; border-radius:16px; padding:40px; box-shadow:0 4px 20px rgba(0,0,0,.06); margin-bottom:24px; text-align:center; }
+.hero h2 { font-size:24px; font-weight:700; margin-bottom:8px; }
+.hero p { color:#64748b; font-size:14px; margin-bottom:28px; }
+.hero-inputs { display:flex; gap:16px; justify-content:center; flex-wrap:wrap; }
+
+.upload-zone { flex:1; min-width:280px; max-width:450px; border:2px dashed #cbd5e1; border-radius:12px; padding:32px 20px; cursor:pointer; transition:all .2s; }
+.upload-zone:hover, .upload-zone.dragover { border-color:#006EFF; background:#f0f7ff; }
+.upload-zone .icon { font-size:36px; margin-bottom:8px; }
+.upload-zone .label { font-size:14px; color:#64748b; }
+.upload-zone .label b { color:#006EFF; }
+.upload-zone input { display:none; }
+
+.url-box { flex:1; min-width:280px; max-width:450px; border:2px solid #e2e8f0; border-radius:12px; padding:20px; text-align:left; }
+.url-box .icon { font-size:28px; margin-bottom:8px; text-align:center; display:block; }
+.url-box label { font-size:13px; color:#64748b; font-weight:600; display:block; margin-bottom:8px; }
+.url-row { display:flex; gap:8px; }
+.url-row input { flex:1; padding:10px 14px; border:1px solid #e2e8f0; border-radius:8px; font-size:14px; outline:none; }
+.url-row input:focus { border-color:#006EFF; box-shadow:0 0 0 3px rgba(0,110,255,.1); }
+.url-row button { padding:10px 20px; background:#006EFF; color:#fff; border:none; border-radius:8px; font-weight:600; cursor:pointer; white-space:nowrap; }
+.url-row button:hover { background:#0059d6; }
+
+.spinner { display:none; margin:20px auto; }
+.spinner.show { display:block; }
+.spinner::after { content:''; display:block; width:36px; height:36px; margin:0 auto; border:3px solid #e2e8f0; border-top-color:#006EFF; border-radius:50%; animation:spin .6s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+.result { display:none; }
+.result.show { display:block; }
+
+.card { background:#fff; border-radius:12px; padding:24px; box-shadow:0 2px 12px rgba(0,0,0,.05); margin-bottom:16px; }
+.card h3 { font-size:16px; font-weight:700; margin-bottom:12px; display:flex; align-items:center; gap:8px; }
+.card h3 .tag { background:#006EFF; color:#fff; font-size:11px; padding:2px 8px; border-radius:10px; font-weight:600; }
+
+.stats { display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+.stat { background:linear-gradient(135deg,#f8fafc,#f0f4ff); border:1px solid #e2e8f0; border-radius:10px; padding:16px 20px; flex:1; min-width:140px; text-align:center; }
+.stat .num { font-size:28px; font-weight:800; color:#006EFF; }
+.stat .lbl { font-size:12px; color:#64748b; margin-top:2px; }
+
+.info-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px 16px; }
+.info-grid .item { display:flex; gap:8px; font-size:13px; padding:6px 0; border-bottom:1px solid #f1f5f9; }
+.info-grid .item .k { color:#64748b; min-width:90px; font-weight:600; }
+.info-grid .item .v { color:#1e293b; word-break:break-all; }
+
+.cat-badges { display:flex; flex-wrap:wrap; gap:6px; }
+.cat-badge { background:#f0f4ff; border:1px solid #dbeafe; color:#006EFF; padding:4px 12px; border-radius:20px; font-size:12px; font-weight:600; }
+.cat-badge .cnt { background:#006EFF; color:#fff; padding:1px 6px; border-radius:10px; margin-left:4px; font-size:11px; }
+
+.menu-table-wrap { max-height:400px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:8px; margin-top:12px; }
+.menu-table { width:100%; border-collapse:collapse; font-size:13px; }
+.menu-table th { background:#f8fafc; padding:8px 12px; text-align:left; font-weight:600; color:#64748b; position:sticky; top:0; border-bottom:2px solid #e2e8f0; }
+.menu-table td { padding:7px 12px; border-bottom:1px solid #f1f5f9; }
+.menu-table tr:hover td { background:#f8fafc; }
+.menu-table .cat { color:#006EFF; font-weight:600; }
+.menu-table .price { text-align:right; font-weight:600; }
+
+.hours-table { width:100%; border-collapse:collapse; font-size:13px; }
+.hours-table th { background:#f8fafc; padding:6px 10px; text-align:left; font-weight:600; color:#64748b; }
+.hours-table td { padding:6px 10px; border-bottom:1px solid #f1f5f9; }
+
+.actions { display:flex; gap:12px; flex-wrap:wrap; margin-top:20px; }
+.btn { padding:12px 28px; border-radius:10px; font-size:14px; font-weight:700; cursor:pointer; border:none; transition:all .2s; display:flex; align-items:center; gap:8px; }
+.btn-primary { background:#006EFF; color:#fff; }
+.btn-primary:hover { background:#0059d6; transform:translateY(-1px); box-shadow:0 4px 12px rgba(0,110,255,.3); }
+.btn-secondary { background:#f0f4ff; color:#006EFF; border:1px solid #dbeafe; }
+.btn-secondary:hover { background:#dbeafe; }
+.btn-danger { background:#fef2f2; color:#ef4444; border:1px solid #fecaca; }
+.btn-danger:hover { background:#fee2e2; }
+
+.modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:100; align-items:center; justify-content:center; }
+.modal-bg.show { display:flex; }
+.modal { background:#fff; border-radius:16px; padding:32px; width:420px; max-width:90vw; }
+.modal h3 { margin-bottom:16px; }
+.modal input { width:100%; padding:10px 14px; border:1px solid #e2e8f0; border-radius:8px; margin-bottom:12px; font-size:14px; }
+.modal input:focus { border-color:#006EFF; outline:none; }
+
+.log { background:#1e293b; border-radius:8px; padding:16px; font-family:monospace; font-size:12px; color:#94a3b8; max-height:200px; overflow-y:auto; margin-top:12px; display:none; }
+.log.show { display:block; }
+.log .ok { color:#4ade80; }
+.log .err { color:#f87171; }
+.log .info { color:#60a5fa; }
+
+.toast { position:fixed; top:20px; right:20px; background:#1e293b; color:#fff; padding:14px 24px; border-radius:10px; font-size:14px; z-index:200; opacity:0; transform:translateY(-10px); transition:all .3s; pointer-events:none; }
+.toast.show { opacity:1; transform:translateY(0); }
+.toast.error { background:#ef4444; }
+.toast.success { background:#10b981; }
+
+.opt-group-list { display:flex; flex-wrap:wrap; gap:4px; margin-top:6px; }
+.opt-tag { background:#fef3c7; color:#92400e; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600; }
+.opts-summary { font-size:13px; color:#64748b; margin-top:8px; }
+
+@media(max-width:700px) {
+  .hero-inputs { flex-direction:column; }
+  .upload-zone, .url-box { max-width:100%; }
+  .info-grid { grid-template-columns:1fr; }
+}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>CARTE POS <span>Setup Tool</span></h1>
+  <div class="badge">Initial Setup Generator</div>
+</div>
+
+<div class="main">
+  <div class="hero">
+    <h2>CARTE POS Initial Setup</h2>
+    <p>Upload your menu Excel or paste a Google Maps URL — we'll generate everything you need.</p>
+    <div class="hero-inputs">
+      <div class="upload-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+        <div class="icon">📄</div>
+        <div class="label">Drag & drop <b>Menu Excel</b> here<br>or click to browse</div>
+        <input type="file" id="fileInput" accept=".xlsx,.xls,.csv">
+      </div>
+      <div class="url-box">
+        <span class="icon">📍</span>
+        <label>Google Maps URL or Store Name</label>
+        <div class="url-row">
+          <input type="text" id="urlInput" placeholder="https://maps.google.com/... or store name">
+          <button onclick="fetchPlace()">Fetch</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="spinner" id="spinner"></div>
+
+  <div class="result" id="resultPanel">
+    <div class="stats" id="statsRow"></div>
+
+    <div class="card" id="storeCard" style="display:none">
+      <h3>Store Info <span class="tag" id="storeCount"></span></h3>
+      <div class="info-grid" id="storeGrid"></div>
+    </div>
+
+    <div class="card" id="hoursCard" style="display:none">
+      <h3>Business Hours</h3>
+      <table class="hours-table" id="hoursTable"></table>
+    </div>
+
+    <div class="card" id="menuCard" style="display:none">
+      <h3>Menu <span class="tag" id="menuCount"></span></h3>
+      <div class="cat-badges" id="catBadges"></div>
+      <div class="menu-table-wrap">
+        <table class="menu-table" id="menuTable"></table>
+      </div>
+    </div>
+
+    <div class="card" id="optCard" style="display:none">
+      <h3>Options <span class="tag" id="optCount"></span></h3>
+      <div class="opt-group-list" id="optGroups"></div>
+      <div class="opts-summary" id="optSummary"></div>
+    </div>
+
+    <div class="card">
+      <h3>Export</h3>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="downloadFull()">Download Full Setup Excel</button>
+        <button class="btn btn-secondary" onclick="downloadMenuOnly()">Menu Import Only</button>
+        <button class="btn btn-secondary" onclick="showPosModal()">Push to CARTE POS</button>
+        <button class="btn btn-danger" onclick="resetAll()">Reset</button>
+      </div>
+      <div class="log" id="pushLog"></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-bg" id="posModal">
+  <div class="modal">
+    <h3>CARTE POS Login</h3>
+    <input type="text" id="posLoginId" placeholder="Login ID">
+    <input type="password" id="posPassword" placeholder="Password">
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn btn-primary" onclick="pushToPOS()" style="flex:1">Push to POS</button>
+      <button class="btn btn-secondary" onclick="closePosModal()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let STATE = { items:[], stores:[], hours:[], options:[], filename:'' };
+
+function toast(msg, type='') {
+  const t = document.getElementById('toast');
+  t.textContent = msg; t.className = 'toast show ' + type;
+  setTimeout(() => t.className = 'toast', 3000);
+}
+
+const dz = document.getElementById('dropZone');
+const fi = document.getElementById('fileInput');
+['dragenter','dragover'].forEach(e => dz.addEventListener(e, ev => { ev.preventDefault(); dz.classList.add('dragover'); }));
+['dragleave','drop'].forEach(e => dz.addEventListener(e, ev => { ev.preventDefault(); dz.classList.remove('dragover'); }));
+dz.addEventListener('drop', ev => { if(ev.dataTransfer.files.length) handleFile(ev.dataTransfer.files[0]); });
+fi.addEventListener('change', ev => { if(ev.target.files.length) handleFile(ev.target.files[0]); });
+
+async function handleFile(file) {
+  if(!file.name.match(/\.(xlsx|xls|csv)$/i)) { toast('Excel file only (.xlsx)', 'error'); return; }
+  document.getElementById('spinner').classList.add('show');
+  document.getElementById('resultPanel').classList.remove('show');
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const resp = await fetch('/api/parse-menu', { method:'POST', body:fd });
+    const data = await resp.json();
+    if(!resp.ok) throw new Error(data.error || 'Parse failed');
+    STATE = data; STATE.filename = file.name;
+    renderResult(data);
+    toast('Parsed: ' + data.total_items + ' items from ' + file.name, 'success');
+  } catch(e) { toast(e.message, 'error'); }
+  finally { document.getElementById('spinner').classList.remove('show'); }
+}
+
+async function fetchPlace() {
+  const q = document.getElementById('urlInput').value.trim();
+  if(!q) { toast('Enter a URL or store name', 'error'); return; }
+  document.getElementById('spinner').classList.add('show');
+  try {
+    const resp = await fetch('/api/fetch-place', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query:q}) });
+    const data = await resp.json();
+    if(!resp.ok) throw new Error(data.error);
+    STATE.stores = [data.result];
+    renderStoreInfo([data.result]);
+    document.getElementById('resultPanel').classList.add('show');
+    toast('Store info loaded: ' + (data.result.name||''), 'success');
+  } catch(e) { toast(e.message, 'error'); }
+  finally { document.getElementById('spinner').classList.remove('show'); }
+}
+
+function renderResult(data) {
+  document.getElementById('resultPanel').classList.add('show');
+  const cats = data.category_summary || {};
+  document.getElementById('statsRow').innerHTML =
+    `<div class="stat"><div class="num">${data.total_items}</div><div class="lbl">Menu Items</div></div>` +
+    `<div class="stat"><div class="num">${Object.keys(cats).length}</div><div class="lbl">Categories</div></div>` +
+    `<div class="stat"><div class="num">${(data.stores||[]).length || '-'}</div><div class="lbl">Locations</div></div>` +
+    `<div class="stat"><div class="num">${(data.hours||[]).length || '-'}</div><div class="lbl">Hour Rules</div></div>` +
+    `<div class="stat"><div class="num">${data.total_options || '-'}</div><div class="lbl">Options</div></div>`;
+  if(data.stores && data.stores.length) renderStoreInfo(data.stores);
+  if(data.hours && data.hours.length) renderHours(data.hours);
+  if(data.items && data.items.length) renderMenu(data.items, cats);
+  if(data.options && data.options.length) renderOptions(data.options, data.total_options);
+}
+
+function renderStoreInfo(stores) {
+  document.getElementById('storeCard').style.display = 'block';
+  document.getElementById('storeCount').textContent = stores.length + ' location' + (stores.length>1?'s':'');
+  let html = '';
+  stores.forEach((s,i) => {
+    if(stores.length > 1) html += `<div class="item" style="grid-column:1/-1;border-bottom:2px solid #006EFF;padding:10px 0 4px"><div class="k" style="color:#006EFF;font-size:14px">${s.name||s.business_name||'Location '+(i+1)}</div><div class="v"></div></div>`;
+    [['Name',s.name||s.business_name],['Address',s.address],['Phone',s.phone],['Website',s.website||s.online_url],['Coords',(s.lat&&s.lng)?s.lat+', '+s.lng:''],['Info',s.description]].forEach(([k,v]) => { if(v) html += `<div class="item"><div class="k">${k}</div><div class="v">${v}</div></div>`; });
+  });
+  document.getElementById('storeGrid').innerHTML = html;
+}
+
+function renderHours(hours) {
+  document.getElementById('hoursCard').style.display = 'block';
+  let html = '<thead><tr><th>Store</th><th>Type</th><th>Days</th><th>Open</th><th>Close</th></tr></thead><tbody>';
+  hours.forEach(h => { html += `<tr><td>${h.store||''}</td><td>${h.type||''}</td><td>${h.days||''}</td><td>${h.open||''}</td><td>${h.close||''}</td></tr>`; });
+  document.getElementById('hoursTable').innerHTML = html + '</tbody>';
+}
+
+function renderMenu(items, cats) {
+  document.getElementById('menuCard').style.display = 'block';
+  document.getElementById('menuCount').textContent = items.length + ' items';
+  let bh = '';
+  Object.entries(cats).sort((a,b)=>b[1]-a[1]).forEach(([c,n]) => { bh += `<span class="cat-badge">${c}<span class="cnt">${n}</span></span>`; });
+  document.getElementById('catBadges').innerHTML = bh;
+  const hasStore = items.some(i => i.store && i.store !== 'Default');
+  let th = '<thead><tr><th>Category</th><th>Item</th><th>Price</th><th>Description</th>';
+  if(hasStore) th += '<th>Store</th>';
+  th += '</tr></thead><tbody>';
+  items.forEach(it => {
+    const d = it.description ? it.description.substring(0,60)+(it.description.length>60?'...':'') : '';
+    th += `<tr><td class="cat">${it.category}</td><td>${it.name}</td><td class="price">$${(it.price||0).toFixed(2)}</td><td>${d}</td>`;
+    if(hasStore) th += `<td>${it.store||''}</td>`;
+    th += '</tr>';
+  });
+  document.getElementById('menuTable').innerHTML = th + '</tbody>';
+}
+
+function renderOptions(options, total) {
+  document.getElementById('optCard').style.display = 'block';
+  document.getElementById('optCount').textContent = total + ' total';
+  const groups = {};
+  options.forEach(o => { if(o.group) groups[o.group] = (groups[o.group]||0)+1; });
+  let h = '';
+  Object.entries(groups).sort((a,b)=>b[1]-a[1]).forEach(([g,c]) => { h += `<span class="opt-tag">${g} (${c})</span>`; });
+  document.getElementById('optGroups').innerHTML = h;
+  document.getElementById('optSummary').textContent = Object.keys(groups).length + ' option groups, ' + total + ' total mappings';
+}
+
+async function downloadFull() {
+  toast('Generating...', '');
+  try {
+    const resp = await fetch('/api/generate-excel', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ upload_filename:STATE.filename||'', store_info:(STATE.stores||[])[0]||{}, items:STATE.items||[], settings:{} })
+    });
+    if(!resp.ok) throw new Error('Failed');
+    const blob = await resp.blob();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    const cd = resp.headers.get('content-disposition');
+    a.download = cd ? cd.match(/filename=(.+)/)?.[1]||'CARTE_Setup.xlsx' : 'CARTE_Setup.xlsx';
+    a.click(); toast('Downloaded!', 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function downloadMenuOnly() {
+  if(!STATE.items||!STATE.items.length) { toast('No menu items', 'error'); return; }
+  try {
+    const resp = await fetch('/api/generate-menu-excel', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({items:STATE.items})
+    });
+    if(!resp.ok) throw new Error('Failed');
+    const blob = await resp.blob();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = 'CARTE_Menu_Import.xlsx'; a.click(); toast('Downloaded!', 'success');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+function showPosModal() { document.getElementById('posModal').classList.add('show'); }
+function closePosModal() { document.getElementById('posModal').classList.remove('show'); }
+
+async function pushToPOS() {
+  const id = document.getElementById('posLoginId').value.trim();
+  const pw = document.getElementById('posPassword').value.trim();
+  if(!id||!pw) { toast('Enter credentials', 'error'); return; }
+  closePosModal();
+  const log = document.getElementById('pushLog');
+  log.classList.add('show');
+  log.innerHTML = '<div class="info">Connecting...</div>';
+  try {
+    const resp = await fetch('/api/push-to-pos', { method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({ login_id:id, password:pw, items:STATE.items||[], store_info:(STATE.stores||[])[0]||{}, settings:{} })
+    });
+    const data = await resp.json();
+    if(!resp.ok) { log.innerHTML += `<div class="err">Error: ${data.error}</div>`; return; }
+    (data.results||[]).forEach(r => { log.innerHTML += `<div class="${r.status==='success'?'ok':'err'}">[${r.status}] ${r.step}</div>`; });
+    (data.errors||[]).forEach(e => { log.innerHTML += `<div class="err">[ERROR] ${e.step}: ${e.error}</div>`; });
+    log.innerHTML += `<div class="info">Done. Branch: ${data.branch_id||'N/A'}</div>`;
+    toast(data.success ? 'Push complete!' : 'Completed with errors', data.success ? 'success' : 'error');
+  } catch(e) { log.innerHTML += `<div class="err">${e.message}</div>`; toast('Failed', 'error'); }
+  log.scrollTop = log.scrollHeight;
+}
+
+function resetAll() {
+  STATE = { items:[], stores:[], hours:[], options:[], filename:'' };
+  document.getElementById('resultPanel').classList.remove('show');
+  ['storeCard','hoursCard','menuCard','optCard'].forEach(id => document.getElementById(id).style.display = 'none');
+  document.getElementById('pushLog').classList.remove('show');
+  document.getElementById('fileInput').value = '';
+  document.getElementById('urlInput').value = '';
+  toast('Reset', '');
+}
+</script>
+</body>
+</html>
