@@ -161,10 +161,20 @@ body { font-family: 'Segoe UI', -apple-system, sans-serif; background:#f0f4f8; c
       </div>
       <div class="url-box">
         <span class="icon">🔗</span>
-        <label>BentoBox or Google Maps URL</label>
+        <label>Restaurant URL or Name</label>
         <div class="url-row">
-          <input type="text" id="urlInput" placeholder="Paste BentoBox URL (*.getbento.com) or Google Maps URL">
+          <input type="text" id="urlInput" placeholder="BentoBox, Yelp, Google Maps URL or store name">
           <button onclick="fetchPlace()">Fetch</button>
+        </div>
+        <div style="margin-top:8px;display:flex;align-items:center;gap:6px">
+          <button onclick="toggleApiKeys()" style="background:none;border:1px solid #e2e8f0;border-radius:6px;padding:3px 10px;font-size:11px;color:#64748b;cursor:pointer">API Keys</button>
+          <span style="font-size:11px;color:#94a3b8" id="apiStatus"></span>
+        </div>
+        <div id="apiKeysPanel" style="display:none;margin-top:8px;font-size:12px">
+          <input type="password" id="yelpKey" placeholder="Yelp Fusion API Key (free)" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:6px;margin-bottom:4px;font-size:12px">
+          <input type="password" id="googleKey" placeholder="Google Places API Key (free credit)" style="width:100%;padding:6px 10px;border:1px solid #e2e8f0;border-radius:6px;margin-bottom:4px;font-size:12px">
+          <button onclick="saveApiKeys()" style="padding:4px 12px;background:#006EFF;color:#fff;border:none;border-radius:6px;font-size:11px;cursor:pointer">Save</button>
+          <span style="color:#94a3b8;margin-left:4px;font-size:11px">Stored in browser only</span>
         </div>
       </div>
     </div>
@@ -266,25 +276,64 @@ async function handleFile(file) {
   finally { document.getElementById('spinner').classList.remove('show'); }
 }
 
+// API Key management
+function toggleApiKeys() { const p=document.getElementById('apiKeysPanel'); p.style.display=p.style.display==='none'?'block':'none'; }
+function saveApiKeys() {
+  const yk=document.getElementById('yelpKey').value.trim();
+  const gk=document.getElementById('googleKey').value.trim();
+  if(yk) localStorage.setItem('carte_yelp_key', yk);
+  if(gk) localStorage.setItem('carte_google_key', gk);
+  updateApiStatus();
+  toggleApiKeys();
+  toast('API keys saved', 'success');
+}
+function updateApiStatus() {
+  const yk=localStorage.getItem('carte_yelp_key');
+  const gk=localStorage.getItem('carte_google_key');
+  const parts=[];
+  if(yk) parts.push('Yelp');
+  if(gk) parts.push('Google');
+  document.getElementById('apiStatus').textContent = parts.length ? parts.join(' + ') + ' connected' : '';
+}
+// Load saved keys on page load
+(function(){
+  const yk=localStorage.getItem('carte_yelp_key');
+  const gk=localStorage.getItem('carte_google_key');
+  if(yk) document.getElementById('yelpKey').value = yk;
+  if(gk) document.getElementById('googleKey').value = gk;
+  updateApiStatus();
+})();
+
 async function fetchPlace() {
   const q = document.getElementById('urlInput').value.trim();
   if(!q) { toast('Enter a URL or store name', 'error'); return; }
   document.getElementById('spinner').classList.add('show');
   document.getElementById('resultPanel').classList.remove('show');
   try {
-    const resp = await fetch('/api/fetch-place', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({query:q}) });
+    const body = {query: q};
+    const yk = localStorage.getItem('carte_yelp_key');
+    const gk = localStorage.getItem('carte_google_key');
+    if(yk) body.yelp_api_key = yk;
+    if(gk) body.google_api_key = gk;
+
+    const resp = await fetch('/api/fetch-place', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
     const data = await resp.json();
     if(!resp.ok) throw new Error(data.error);
 
-    // BentoBox response has 'source':'bentobox' and 'locations'
+    // BentoBox response
     if(data.source === 'bentobox' && data.locations) {
       handleBentoBoxData(data);
-    } else {
-      // Google Maps / generic result
-      STATE = { items:[], stores:[data.result], hours:[], options:[], filename:'', source:'google', bentobox_data:null };
-      renderStoreInfo([data.result]);
+    }
+    // Yelp / Google response (same structure: source + locations)
+    else if((data.source === 'yelp' || data.source === 'google') && data.locations) {
+      handleApiData(data);
+    }
+    // Legacy scrape result
+    else {
+      STATE = { items:[], stores:[data.result||{}], hours:[], options:[], filename:'', source:data.source||'scrape', bentobox_data:null };
+      renderStoreInfo([data.result||{}]);
       document.getElementById('resultPanel').classList.add('show');
-      toast('Store info loaded: ' + (data.result.name||''), 'success');
+      toast('Store info loaded (basic): ' + ((data.result||{}).name||''), 'success');
     }
   } catch(e) { toast(e.message, 'error'); }
   finally { document.getElementById('spinner').classList.remove('show'); }
@@ -342,6 +391,76 @@ function handleBentoBoxData(data) {
 
   renderBentoBoxResult(data);
   toast('BentoBox: ' + allItems.length + ' items from ' + data.business_name, 'success');
+}
+
+function handleApiData(data) {
+  // Handle Yelp / Google Places response (store info only, no menu)
+  const stores = [];
+  const allHours = [];
+  (data.locations || []).forEach(loc => {
+    const addr = loc.address || {};
+    const fullAddr = addr.full || [addr.street, addr.city, addr.state, addr.zip].filter(Boolean).join(', ');
+    stores.push({
+      name: loc.name || data.business_name,
+      business_name: data.business_name,
+      address: fullAddr,
+      phone: loc.phone,
+      lat: loc.lat, lng: loc.lng,
+      website: loc.website || '',
+      rating: loc.rating || '',
+      review_count: loc.review_count || 0,
+      price: loc.price || '',
+      categories: loc.categories || [],
+      transactions: loc.transactions || [],
+      image_url: loc.image_url || '',
+      photos: loc.photos || [],
+    });
+    (loc.hours || []).forEach(h => allHours.push({...h, store: loc.name}));
+  });
+
+  STATE = {
+    items: [],
+    stores: stores,
+    hours: allHours,
+    options: [],
+    filename: '',
+    source: data.source || 'api',
+    bentobox_data: null,
+    category_summary: {},
+    total_items: 0,
+  };
+
+  document.getElementById('resultPanel').classList.add('show');
+  const src = (data.source||'').toUpperCase();
+  const loc = data.locations?.[0] || {};
+  const cats = (loc.categories||[]).join(', ');
+
+  // Stats
+  document.getElementById('statsRow').innerHTML =
+    `<div class="stat"><div class="num">${stores.length}</div><div class="lbl">Location${stores.length>1?'s':''}</div></div>` +
+    `<div class="stat"><div class="num">${allHours.length||'-'}</div><div class="lbl">Hour Rules</div></div>` +
+    `<div class="stat"><div class="num">${loc.rating||'-'}</div><div class="lbl">Rating</div></div>` +
+    `<div class="stat"><div class="num">${loc.review_count||'-'}</div><div class="lbl">Reviews</div></div>` +
+    `<div class="stat" style="background:${src==='YELP'?'#d32323':'#4285f4'}22"><div class="num" style="font-size:16px;color:${src==='YELP'?'#d32323':'#4285f4'}">${src}</div><div class="lbl">Source</div></div>`;
+
+  // Store info
+  renderStoreInfo(stores);
+
+  // Hours
+  if(allHours.length) {
+    document.getElementById('hoursCard').style.display = 'block';
+    let hhtml = '<thead><tr><th>Day</th><th>Open</th><th>Close</th><th>Type</th></tr></thead><tbody>';
+    allHours.forEach(h => { hhtml += `<tr><td>${esc(h.days||'')}</td><td>${esc(h.open||'')}</td><td>${esc(h.close||'')}</td><td>${esc(h.type||'')}</td></tr>`; });
+    document.getElementById('hoursTable').innerHTML = hhtml + '</tbody>';
+  }
+
+  // No menu — show upload prompt
+  document.getElementById('menuCard').style.display = 'block';
+  document.getElementById('menuCount').textContent = 'No menu data';
+  document.getElementById('catBadges').innerHTML = `<span style="color:#64748b;font-size:13px">${src} provides store info only. Upload a menu Excel file to add menu items.</span>`;
+  document.getElementById('menuTable').innerHTML = '';
+
+  toast(`${src}: ${data.business_name} loaded (store info only, no menu)`, 'success');
 }
 
 // ── Render: standard Excel result ──

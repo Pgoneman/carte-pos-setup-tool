@@ -654,14 +654,172 @@ def _parse_compare(rows):
     return items
 
 
-# ─── Google Maps URL Parser ───────────────────────────────────────────────
+# ─── Yelp Fusion API ──────────────────────────────────────────────────────
 
-def fetch_place_info(query):
-    """Extract store info from Google Maps URL or search query."""
+def is_yelp_url(url):
+    return 'yelp.com/biz/' in url.lower()
+
+def extract_yelp_slug(url):
+    m = re.search(r'yelp\.com/biz/([a-z0-9-]+)', url, re.I)
+    return m.group(1) if m else None
+
+def fetch_yelp_data(query, api_key):
+    """Fetch store info from Yelp Fusion API. Free: 5,000 calls/day."""
+    headers = {'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'}
+    base = 'https://api.yelp.com/v3'
+
+    # If it's a Yelp URL, extract the slug and use it as business ID alias
+    slug = extract_yelp_slug(query) if is_yelp_url(query) else None
+
+    if slug:
+        r = http_req.get(f'{base}/businesses/{slug}', headers=headers, timeout=15)
+        if r.status_code != 200:
+            raise ValueError(f'Yelp API error: {r.status_code} {r.text[:200]}')
+        biz = r.json()
+    else:
+        # Search by name
+        r = http_req.get(f'{base}/businesses/search', headers=headers, timeout=15,
+                         params={'term': query, 'limit': 1, 'sort_by': 'best_match'})
+        if r.status_code != 200:
+            raise ValueError(f'Yelp search error: {r.status_code}')
+        results = r.json().get('businesses', [])
+        if not results:
+            raise ValueError('No Yelp results found')
+        biz = results[0]
+
+    loc = biz.get('location', {})
+    hours_raw = biz.get('hours', [{}])[0].get('open', []) if biz.get('hours') else []
+    day_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+    hours = []
+    for h in hours_raw:
+        day = day_names[h['day']] if h['day'] < 7 else '?'
+        hours.append({
+            'days': day,
+            'open': f"{h['start'][:2]}:{h['start'][2:]}",
+            'close': f"{h['end'][:2]}:{h['end'][2:]}",
+            'type': 'Dine-in',
+        })
+
+    cats = [c['title'] for c in biz.get('categories', [])]
+    transactions = biz.get('transactions', [])
+
+    return {
+        'source': 'yelp',
+        'business_name': biz.get('name', ''),
+        'locations': [{
+            'name': biz.get('name', ''),
+            'address': {
+                'street': loc.get('address1', ''),
+                'city': loc.get('city', ''),
+                'state': loc.get('state', ''),
+                'zip': loc.get('zip_code', ''),
+            },
+            'phone': biz.get('display_phone', biz.get('phone', '')),
+            'lat': str(biz.get('coordinates', {}).get('latitude', '')),
+            'lng': str(biz.get('coordinates', {}).get('longitude', '')),
+            'hours': hours,
+            'rating': biz.get('rating', ''),
+            'review_count': biz.get('review_count', 0),
+            'price': biz.get('price', ''),
+            'categories': cats,
+            'transactions': transactions,
+            'image_url': biz.get('image_url', ''),
+            'website': biz.get('url', ''),
+            'menu': {'categories': []},  # Yelp doesn't provide menu data
+        }],
+    }
+
+
+# ─── Google Places API ────────────────────────────────────────────────────
+
+def is_google_maps_url(url):
+    return any(k in url.lower() for k in ['google.com/maps', 'goo.gl/maps', 'maps.app.goo.gl'])
+
+def fetch_google_places_data(query, api_key):
+    """Fetch store info from Google Places API. Free: $200/month credit."""
+    headers = {'X-Goog-Api-Key': api_key, 'Content-Type': 'application/json'}
+
+    # Extract place name from Google Maps URL if applicable
+    search_term = query
+    if is_google_maps_url(query):
+        m = re.search(r'/place/([^/@]+)', query)
+        if m:
+            from urllib.parse import unquote
+            search_term = unquote(m.group(1).replace('+', ' '))
+
+    # Text Search to find the place
+    r = http_req.post('https://places.googleapis.com/v1/places:searchText',
+        headers={**headers,
+                 'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.internationalPhoneNumber,places.websiteUri,places.regularOpeningHours,places.rating,places.userRatingCount,places.priceLevel,places.photos,places.location,places.types,places.dineIn,places.delivery,places.takeout'},
+        json={'textQuery': search_term}, timeout=15)
+
+    if r.status_code != 200:
+        raise ValueError(f'Google Places error: {r.status_code} {r.text[:200]}')
+
+    places = r.json().get('places', [])
+    if not places:
+        raise ValueError('No Google Places results found')
+
+    place = places[0]
+    loc = place.get('location', {})
+    hours_raw = place.get('regularOpeningHours', {}).get('weekdayDescriptions', [])
+    hours = []
+    for desc in hours_raw:
+        # "Monday: 11:00 AM – 10:00 PM"
+        parts = desc.split(': ', 1)
+        if len(parts) == 2:
+            day = parts[0][:3]
+            time_range = parts[1]
+            if 'Closed' in time_range:
+                hours.append({'days': day, 'open': '', 'close': '', 'type': 'Closed'})
+            else:
+                m = re.match(r'(\d+:\d+\s*[AP]M)\s*[–-]\s*(\d+:\d+\s*[AP]M)', time_range)
+                if m:
+                    hours.append({'days': day, 'open': m.group(1), 'close': m.group(2), 'type': 'Dine-in'})
+
+    # Get photo URLs (first 3)
+    photo_urls = []
+    for photo in place.get('photos', [])[:3]:
+        photo_name = photo.get('name', '')
+        if photo_name:
+            photo_urls.append(f'https://places.googleapis.com/v1/{photo_name}/media?maxWidthPx=400&key={api_key}')
+
+    services = []
+    if place.get('dineIn'): services.append('Dine-in')
+    if place.get('takeout'): services.append('Takeout')
+    if place.get('delivery'): services.append('Delivery')
+
+    return {
+        'source': 'google',
+        'business_name': place.get('displayName', {}).get('text', ''),
+        'locations': [{
+            'name': place.get('displayName', {}).get('text', ''),
+            'address': {'full': place.get('formattedAddress', '')},
+            'phone': place.get('nationalPhoneNumber', place.get('internationalPhoneNumber', '')),
+            'lat': str(loc.get('latitude', '')),
+            'lng': str(loc.get('longitude', '')),
+            'hours': hours,
+            'rating': place.get('rating', ''),
+            'review_count': place.get('userRatingCount', 0),
+            'price': place.get('priceLevel', ''),
+            'categories': place.get('types', []),
+            'transactions': services,
+            'image_url': photo_urls[0] if photo_urls else '',
+            'photos': photo_urls,
+            'website': place.get('websiteUri', ''),
+            'menu': {'categories': []},
+        }],
+    }
+
+
+# ─── Legacy Google Maps scraper (no API key) ──────────────────────────────
+
+def fetch_place_info_scrape(query):
+    """Fallback: basic scraping from Google Maps URL (limited data)."""
     result = {'name':'','address':'','phone':'','hours':[],'rating':'',
               'category':'','website':'','lat':'','lng':''}
     try:
-        if 'google.com/maps' in query or 'goo.gl' in query or 'maps.app' in query:
+        if is_google_maps_url(query):
             m = re.search(r'/place/([^/@]+)', query)
             if m:
                 from urllib.parse import unquote
@@ -670,18 +828,6 @@ def fetch_place_info(query):
             if m:
                 result['lat'] = m.group(1)
                 result['lng'] = m.group(2)
-            try:
-                resp = http_req.get(query, headers={'User-Agent':'Mozilla/5.0'}, timeout=10, allow_redirects=True)
-                text = resp.text
-                m = re.search(r'<title>([^<]+)</title>', text)
-                if m:
-                    title = re.sub(r'\s*[-–]\s*Google.*$', '', m.group(1)).strip()
-                    if title: result['name'] = title
-                m = re.search(r'"formatted_phone_number":"([^"]+)"', text)
-                if m: result['phone'] = m.group(1)
-                m = re.search(r'"formatted_address":"([^"]+)"', text)
-                if m: result['address'] = m.group(1)
-            except: pass
         else:
             result['name'] = query
     except: pass
@@ -991,10 +1137,12 @@ def api_fetch_bentobox():
 def api_fetch_place():
     data = request.get_json(silent=True) or {}
     query = data.get('query', '').strip()
+    yelp_key = data.get('yelp_api_key', '').strip()
+    google_key = data.get('google_api_key', '').strip()
     if not query:
         return jsonify({'error': 'No query provided'}), 400
 
-    # Detect BentoBox URLs and redirect to BentoBox fetcher
+    # 1. BentoBox (best: menu + photos + store info)
     if is_bentobox_url(query):
         try:
             result = fetch_bentobox_data(query)
@@ -1004,9 +1152,34 @@ def api_fetch_place():
         except Exception as e:
             return jsonify({'error': f'BentoBox fetch failed: {e}'}), 500
 
-    # Google Maps or generic query
-    result = fetch_place_info(query)
-    return jsonify({'success': True, 'result': result})
+    # 2. Yelp (store info only, no menu)
+    if is_yelp_url(query) and yelp_key:
+        try:
+            result = fetch_yelp_data(query, yelp_key)
+            return jsonify(result)
+        except Exception as e:
+            return jsonify({'error': f'Yelp fetch failed: {e}'}), 400
+
+    # 3. Google Places API (store info only, no menu)
+    if google_key:
+        try:
+            result = fetch_google_places_data(query, google_key)
+            return jsonify(result)
+        except Exception as e:
+            # Fall through to scraping
+            pass
+
+    # 4. Yelp API for non-URL queries (search by name)
+    if yelp_key and not is_google_maps_url(query):
+        try:
+            result = fetch_yelp_data(query, yelp_key)
+            return jsonify(result)
+        except:
+            pass
+
+    # 5. Basic scraping fallback (minimal data)
+    result = fetch_place_info_scrape(query)
+    return jsonify({'success': True, 'source': 'scrape', 'result': result})
 
 
 @app.route('/api/generate-excel', methods=['POST'])
